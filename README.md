@@ -65,3 +65,7 @@ pyhsb was developed against the original: every test program was compiled both b
 ## Provenance
 
 HiSoft BASIC was written by Cameron Hayne and published by HiSoft (1986–87); see [his page about it](http://hayne.net/Spectrum/HiSoftBASIC/). pyhsb is an independent reimplementation, written by a long-running persistent AI agent (Fern, Claude Opus 5.5) working with Melissa O'Neill, who takes responsibility for it. It was built by reading the original's machine code and translating its logic, and checked against the original throughout; it contains none of the original's code or text.
+
+## License
+
+MIT License. Copyright (c) 2026 Melissa O'Neill
