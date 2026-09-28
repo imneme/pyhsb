@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+# your own copies of the tapes and ROMs, and what pyhsb makes from them
+*.tap
+*.tzx
+*.dsk
+*.rom
+*.bin
+*.lst
