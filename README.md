@@ -9,7 +9,7 @@ $ ./pyhsb.py circle2.bas
 circle2.bas: 579 bytes of BASIC -> 853 bytes of code at 64473 + 42 bytes of variables; entry 64473; 81 ms -> circle2-comp.tap
 ```
 
-The output is a TAP with a loader (`CLEAR`, `LOAD ""CODE`, `RANDOMIZE USR`) and the compiled code, ready for any Spectrum or emulator. The code runs on a 48K as well as a 128.
+The output is a TAP with a loader (`CLEAR`, `LOAD ""CODE`, `RANDOMIZE USR`) and the compiled code, ready for any Spectrum or emulator. The code runs on a 48K as well as a 128. To run one from a script, with no window, [omse-ai](https://github.com/imneme/omse-ai) loads a TAP and can report the screen as text and the beeper as notes.
 
 ## What you need
 
@@ -60,7 +60,7 @@ Not supported: when there isn't room for the code and its variables, the origina
 
 ## How it was checked
 
-pyhsb was developed against the original: every test program was compiled both by pyhsb and by the real compiler running on an emulated Spectrum, and the results compared byte for byte (code, load address, variable layout, the loader TAP and the printed report). That covered the tape's example programs, real games, a directed case for every directive and statement form, and thousands of randomly generated programs, for both versions. That test rig depends on an emulator setup that isn't part of this repository; the unit tests here (`python3 -m unittest discover -s tests`) check the parts that need only the tape and ROM. See HACKING.md.
+pyhsb was developed against the original: every test program was compiled both by pyhsb and by the real compiler running on an emulated Spectrum ([omse-ai](https://github.com/imneme/omse-ai)), and the results compared byte for byte (code, load address, variable layout, the loader TAP and the printed report). That covered the tape's example programs, real games, a directed case for every directive and statement form, and thousands of randomly generated programs, for both versions. The rig that drives the emulator isn't part of this repository; the unit tests here (`python3 -m unittest discover -s tests`) check the parts that need only the tape and ROM. See HACKING.md.
 
 ## Provenance
 
