@@ -43,9 +43,22 @@ Keep the tape and ROM in the current directory under those names, or pass `--tap
 ./pyhsb.py prog.bas --ramtop 40000         # compile below another RAMTOP (the original's X command sets 65367)
 ./pyhsb.py prog.bas --exact                # reproduce the original exactly, bugs and all
 ./pyhsb.py prog.bas --v11                  # HiSoft BASIC 1.1, the 48K version (its tape, and 48.rom)
+./pyhsb.py big.bas --part data             # one half of a big program: the DATA (or: code)
+./pyhsb.py big.bas --keep-basic            # say N when the original would offer to delete the BASIC
 ```
 
 The directives (`REM : OPEN #`, `REM : INT ...`, `REM : LEN ...` and the rest) are the original's; see its manual.
+
+## Big programs
+
+The original compiles on the Spectrum itself, so the BASIC program and its compiled code have to share memory, and a big program doesn't leave room for both. The original has two ways round that, and pyhsb takes them for you:
+
+- When the code won't fit beside the BASIC, the original asks `OKAY TO DELETE BASIC? (Y/N)`, and on Y it builds the code over the program. pyhsb never touches your source file, so it answers Y.
+- When the program has DATA, and its code and DATA won't fit beside the BASIC together, the original says `Use *D,*E`: compile the DATA on its own (the D command), then everything else (E), and join the two halves. pyhsb compiles both halves, each exactly as the original would, and joins them into one CODE block.
+
+Either way, pyhsb says on stderr what it did, and the TAP holds the code the original would have produced, at the address where it runs. `--keep-basic` answers N instead, and stops with "Not enough room for m/c", as the original does. `--part data` or `--part code` gives you one half on its own, as a CODE block for the address where it belongs.
+
+Some programs are too big for any of this. The code and its variables have to fit between address 24576 and RAMTOP, about 40 KB with the original's X command. And when the code is built over the program, it mustn't catch up with a line the compiler hasn't read yet. Either way the answer is "Not enough room for m/c". The manual's advice applies then: `REM : INT` on every variable that only holds whole numbers often makes the code much smaller.
 
 ## Bugs fixed
 
@@ -56,11 +69,9 @@ By default pyhsb fixes the original's compile-time bugs. `--exact` turns the fix
 - The printed report puts every field on its own line, a bug in its printer TAB handling; pyhsb uses the intended columns.
 - Bytes the original skips without writing (DEF FN's parameter slots) hold whatever was in memory; pyhsb writes zeros.
 
-Not supported: when there isn't room for the code and its variables, the original offers to delete the BASIC program to make room; pyhsb reports "Not enough room" instead.
-
 ## How it was checked
 
-pyhsb was developed against the original: every test program was compiled both by pyhsb and by the real compiler running on an emulated Spectrum ([omse-ai](https://github.com/imneme/omse-ai)), and the results compared byte for byte (code, load address, variable layout, the loader TAP and the printed report). That covered the tape's example programs, real games, a directed case for every directive and statement form, and thousands of randomly generated programs, for both versions. The rig that drives the emulator isn't part of this repository; the unit tests here (`python3 -m unittest discover -s tests`) check the parts that need only the tape and ROM. See HACKING.md.
+pyhsb was developed against the original: every test program was compiled both by pyhsb and by the real compiler running on an emulated Spectrum ([omse-ai](https://github.com/imneme/omse-ai)), and the results compared byte for byte (code, load address, variable layout, the loader TAP and the printed report). That covered the tape's example programs, real games, a directed case for every directive and statement form, and thousands of randomly generated programs, for both versions. For big programs it covered both halves, both answers to the delete question and the room checks at their edges, and a 33 KB text adventure, whose two halves the real compiler made and pyhsb reproduces byte for byte. The rig that drives the emulator isn't part of this repository; the unit tests here (`python3 -m unittest discover -s tests`) check the parts that need only the tape and ROM. See HACKING.md.
 
 ## Provenance
 

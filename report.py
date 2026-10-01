@@ -5,7 +5,8 @@ What the compiler sends through RST 10 (raw: tokens stay tokens):
   - each entry point and each REM : LINE line, in pass 1 ('LINE n: +offset')
     and in pass 2 ('LINE n: address #HEX');
   - with REM : LIST, every routine used and every variable, array and string;
-  - the summary (M/C bytes, variables, BASIC) and the SAVE / LOAD lines.
+  - the summary (M/C bytes, variables, BASIC) and the SAVE / LOAD lines, with a
+    flashing D or E in front for one half of a big program.
 
 Fields are positioned by 0xE76A, meant to be TAB column.  Its printer branch
 sends TAB, 0, *row* (7), so the printer gets TAB 1792: column 0 on a
@@ -63,6 +64,8 @@ def dims(ent):                                 # E7E6: (first,last) or (last)
 
 
 def render(img, res, exact=False):
+    if res.parts:                              # a big program's two halves: both reports, D's first
+        return b''.join(render(img, part, exact) for part in res.parts)
     def tab(col):                              # E76A with B = 7, C = col
         return b'\x17\x00\x07' if exact else bytes([0x17, col, 0])
 
@@ -100,7 +103,9 @@ def render(img, res, exact=False):
                 out += tab(21) + addr(ent['addr'] + res.load) + b'\r'
         out += tab(0) + b'\r'                                    # the last E6D8 finds nothing
     m = lambda n: po_msg(img, SUMMARY_TABLE, n)                  # E1DC, E209
-    out += m(0) + m(1) + num(len(res.code)) + m(2) + num(res.var_bytes) + m(3) + num(res.basic_bytes) + m(4)
+    mc = res.mc_bytes or len(res.code)                           # the whole program's code + DATA
+    out += m(0) + m(1) + num(mc) + m(2) + num(res.var_bytes) + m(3) + num(res.basic_bytes) + m(4)
+    out += {'D': m(8), 'E': m(9)}.get(res.mode, b'')             # a flashing D or E: which half this is
     out += m(5) + num(res.save) + b',' + num(len(res.code)) + b'\r' + m(6) + num(res.load)
     return bytes(out)
 
@@ -126,6 +131,8 @@ def render_text(data, kw):
             i += 2
         elif b == 0x16 and i + 2 < len(data):
             i += 2
+        elif 0x10 <= b <= 0x15 and i + 1 < len(data):  # INK .. OVER (the D or E flashes)
+            i += 1
         elif b == 0x06:
             pad = 16 - col % 16
             line.append(' ' * pad); col += pad

@@ -55,6 +55,7 @@ class Machine:
         self.mem[0:16384] = rom
         img.load_into(self.mem)
         self.far = bytearray(65536)          # the target: code lands at out_base + pc
+        self.de_flags = 0                    # F072: under D (1) the emitters store nothing
         self.cpu = Z80(self.mem)
         self.cpu.sp = 0x5A00                 # the compiler's own stack, in the attribute file
         p, c, far = self.p, self.cpu, self.far
@@ -80,8 +81,8 @@ class Machine:
             far[cpu.hl] = cpu.c; cpu.hl = (cpu.hl + 1) & 0xFFFF; far[cpu.hl] = cpu.b
 
         def lddr(cpu):
-            # no emitter copies backwards; the compiler uses LDDR only to move its finished
-            # code (the 'delete the BASIC?' path), which pyhsb doesn't take
+            # no emitter copies backwards; the compiler uses LDDR only to move the program
+            # and its finished code (the 'delete the BASIC?' path), which compiler.py does itself
             raise NotImplementedError('far LDDR')
 
         if not p.get('direct'):
@@ -123,7 +124,7 @@ class Machine:
         p = self.p
         self.setw(p['code_pc'], pc)
         self.mem[p['counting']] = 1 if counting else 0
-        self.mem[p['de_flags']] = 0
+        self.mem[p['de_flags']] = self.de_flags
         direct = p.get('direct')
         self.setw(p['out_base'], p['staging'] if direct else 0)
         self.setw(p['code_base'], code_base)
@@ -133,7 +134,7 @@ class Machine:
         self.cpu.sp = 0x5A00
         self.cpu.call(addr)
         end = self.w(p['code_pc'])
-        if direct and not counting:
+        if direct and not counting and not self.de_flags & 1:
             st = p['staging']
             self.far[pc:end] = self.mem[st + pc:st + end]
         return end

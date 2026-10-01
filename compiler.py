@@ -9,6 +9,8 @@ arithmetic from the user's ROM (romfp).  No HiSoft bytes live here.
 
     c = Compiler(image, rom)
     r = c.compile(program_bytes)      # -> Result (code, load address, ...)
+    r = c.compile_whole(program_bytes)          # a big program too: halves joined if need be
+    r = c.compile(program_bytes, mode='D')      # one half: only the DATA ('E': all but it)
 """
 from dataclasses import dataclass, field
 
@@ -76,10 +78,19 @@ class Result:
     ok: bool = False
     error: str = ''
     error_line: int = None
-    code: bytes = b''            # the CODE block (main code, runtime, DATA)
-    load: int = 0                # where it runs (code_base)
-    save: int = 0                # where it was built (out_base)
+    error_code: object = None    # the message number (100..111), or ('rom', n, note)
+    code: bytes = b''            # the CODE block (main code, runtime, DATA), or the half asked for
+    load: int = 0                # where it runs (code_base; for the DATA half, where the DATA goes)
+    save: int = 0                # where the original left it (out_base)
     var_bytes: int = 0
+    # big programs (see Compiler._compile)
+    mode: str = 'C'              # C (the whole), D (only the DATA), E (all but the DATA); 'D+E' joined
+    mc_bytes: int = 0            # the whole program's code + DATA, whichever part this is
+    code_base: int = 0           # where the whole program's code starts
+    asked: bool = False          # the original would ask OKAY TO DELETE BASIC? (Y/N)
+    deleted: bool = False        # ... and was answered Y: built over the BASIC, then moved
+    do_not_test: bool = False    # the original says DO NOT TEST (save != code_base)
+    parts: list = field(default_factory=list)      # for 'D+E': the two Results, D first
     basic_bytes: int = 0
     entries: list = field(default_factory=list)   # [(line, address)] of each REM : OPEN #
     unwritten: list = field(default_factory=list)  # code offsets the compiler skips without writing
@@ -141,6 +152,7 @@ class Compiler:
         self.far = self.m.far
         self.ramtop = ramtop
         self.prog_addr = prog_addr
+        self.de_flags = 0
 
     # =====================================================================================
     # the source: one line at a time in a buffer, with CH_ADD as an index
@@ -222,8 +234,12 @@ class Compiler:
     # emitting (C4AF..C5E5)
     # =====================================================================================
     @property
-    def storing(self):                    # C50A: Z if this pass stores code
-        return not self.counting
+    def storing(self):                    # C50A: Z if this pass stores code (not under D)
+        return not self.counting and not self.de_flags & 1
+
+    @property
+    def storing_data(self):               # C515: Z if this pass stores DATA (not under E)
+        return not self.counting and not self.de_flags & 2
 
     def emit_byte(self, a):               # C4B9
         if self.storing:
@@ -1997,13 +2013,13 @@ class Compiler:
             else:
                 self.number_maybe_val()
                 if not data_int:
-                    if self.storing:
+                    if self.storing_data:
                         self.far[where:where + 5] = self.calc[-1]
                     self.data_size += 5
                 else:
                     if self.t == REAL:
                         self.error(102)
-                    if self.storing:
+                    if self.storing_data:                   # (so under E, not even rounded)
                         v = self.round_pop()
                         self.far[where] = v & 0xFF
                         self.far[where + 1] = v >> 8
@@ -2027,12 +2043,12 @@ class Compiler:
                 i += 1
                 if buf[i] != ord('"'):
                     break
-            if self.storing:
+            if self.storing_data:
                 self.far[d] = buf[i]
                 d += 1
             n += 1
         self.ch = i
-        if self.storing:
+        if self.storing_data:
             self.far[where] = n & 0xFF
             self.far[where + 1] = (n >> 8) & 0xFF
         return n
@@ -2494,6 +2510,7 @@ class Compiler:
         else:
             self.m.mem[img.org + len(img.data):0x10000] = bytes(0x10000 - img.org - len(img.data))
         self.m.mem[self.TABLE + 1] = 0x80               # E3EE: an empty table
+        self.de_flags = 0                  # F072, set by the menu: C 0, D 1, E 2
         self.n_listed = 0                  # 4519
         self.vars_start = 0                # F07B
         self.data_start = 0                # 44F1
@@ -2537,14 +2554,25 @@ class Compiler:
             }
         return self.STATEMENTS
 
-    def compile(self, prog):
-        res = Result()
+    MODES = {'C': 0, 'D': 1, 'E': 2}        # the menu's commands, as the flags at F072
+
+    def compile(self, prog, mode='C', delete=True):
+        """One of the original's compile commands: mode 'C' compiles the program, 'D' only
+        its DATA and 'E' all but its DATA (the manual's two halves of a big program, which
+        are designed to be joined: E's code, then D's DATA right after it).
+
+        delete: the answer to OKAY TO DELETE BASIC? (Y/N), which the original asks when the
+        code won't fit beside the BASIC program.  Y (True) builds it over the program, as the
+        original would; pyhsb never touches the source, so nothing is lost.  N (False) gives
+        'Not enough room for m/c', as the original does."""
+        res = Result(mode=mode)
         try:
-            self._compile(prog, res)
+            self._compile(prog, res, mode, delete)
             res.ok = True
         except CompileError as e:
             res.ok = False
             res.error = self.message(e.code)
+            res.error_code = e.code
             res.error_line = e.line
             res.detail = e.detail
             res.rom_report = isinstance(e.code, tuple)
@@ -2552,10 +2580,27 @@ class Compiler:
             # any other ROM error while compiling (e.g. 'Number too big' from VAL "1e99"):
             # the original has no handler for it either
             res.ok = False
-            res.error = self.message(('rom', e.code, NOTE_NO_HANDLER if self.exact else ''))
+            res.error_code = ('rom', e.code, NOTE_NO_HANDLER if self.exact else '')
+            res.error = self.message(res.error_code)
             res.error_line = self.line_no
             res.rom_report = True
         return res
+
+    def compile_whole(self, prog, delete=True):
+        """The whole program, however big, as one block.  The C command; and where the
+        original says 'Use *D,*E' (the code and its DATA won't fit beside the BASIC
+        together), the two halves the manual prescribes, D then E, joined.  Each half is
+        exactly what the original makes; the joined block is what it would load as."""
+        res = self.compile(prog, 'C', delete)
+        if res.ok or res.error_code != 107:
+            return res
+        d = self.compile(prog, 'D', delete)
+        if not d.ok:
+            return d
+        e = self.compile(prog, 'E', delete)
+        if not e.ok:
+            return e
+        return join_parts(d, e)
 
     def message(self, code):
         """A message's text: the compiler's own (from the image), or a ROM report's as
@@ -2568,8 +2613,10 @@ class Compiler:
             return f'{letter} ' + report.po_msg(self.rom, ROM_REPORTS, n).decode('latin-1') + note
         return report.po_msg(self.m.img, MSG_TABLE[self.v11], code - 100).decode('latin-1')
 
-    def _compile(self, prog, res):
+    def _compile(self, prog, res, mode='C', delete=True):
         self.reset(prog)
+        self.de_flags = self.MODES[mode]                   # F072 (C1BE)
+        self.m.de_flags = self.de_flags                    # ... which the library's emitters read too
         top = self.ramtop + 1                              # 44E7
         vars_addr = self.prog_addr + len(prog)             # VARS
         free = top - vars_addr
@@ -2586,50 +2633,79 @@ class Compiler:
         self.pass0 = 0
         # pass 1: sizes and the routine layout
         self.run_pass()
-        self.data_start = self.pc                          # 44F1
+        self.data_start = self.pc                          # 44F1: the code proper
         self.pc = (self.pc + self.data_size) & 0xFFFF
-        self.vars_start = self.pc                          # F07B
+        self.vars_start = self.pc                          # F07B: code + DATA
         self.layout_vars()
         self.var_bytes = (self.pc - self.vars_start) & 0xFFFF   # F07D
         total = self.pc
-        fits = self.free300 >= total
-        size = total if fits else self.vars_start          # 4511
+        # E5AF: how much this command keeps (4511).  C keeps code and DATA, and room for
+        # the variables beside them if there is any: if not, they're left out (DO NOT TEST).
+        if mode == 'C':
+            size = total if self.free300 >= total else self.vars_start
+        elif mode == 'D':
+            size = self.data_size
+        else:
+            size = self.data_start
+        # E566: whether it can be done at all.  The code and its variables must fit between
+        # 0x6000 and RAMTOP; the code proper must fit even if the BASIC were deleted; and the
+        # code, built over the BASIC, mustn't reach a line before it has been read.
         if total + 0x6000 > 0xFFFF or total + 0x6000 > top:
             raise CompileError(108)
         if self.free300 + len(prog) < self.data_start:
             raise CompileError(108)
         if self.overflow:
             raise CompileError(108)
-        if self.data_size and self.free300 < self.vars_start:
+        # ... and C with DATA mustn't need the BASIC deleted (presumably because its DATA,
+        # stored out ahead of the code, would land on lines not yet read).  'Use *D,*E': the
+        # manual's two halves.
+        if mode == 'C' and self.data_size and self.free300 < self.vars_start:
             raise CompileError(107)
         self.out_base = top - size                         # F07F
         if self.auto_base:
             self.code_base = (top - total) & 0xFFFF
         if self.code_base + total > top:
             raise CompileError(109)
-        if not fits:
-            # the original asks whether to delete the BASIC program to make room, and then
-            # moves the code; pyhsb doesn't do that
-            raise CompileError(108, detail='the original would offer to delete the BASIC program '
-                                           'to make room; pyhsb does not do that')
+        load = (self.code_base + (self.data_start if mode == 'D' else 0)) & 0xFFFF   # F083
+        # E4CB: not even this much fits beside the BASIC.  The original asks OKAY TO DELETE
+        # BASIC? (Y/N) (E54D); on Y it moves the program up under RAMTOP (E531), empties it,
+        # and builds the code where the program was, reading the lines from their new place.
+        # Afterwards (E53B) it moves the code up under RAMTOP.  On N: 'Not enough room for m/c'.
+        deleted = False
+        if self.free300 < size:
+            res.asked = True
+            if not delete:
+                raise CompileError(108, detail='the original asks OKAY TO DELETE BASIC? (Y/N) here, '
+                                               'and was answered N')
+            deleted = True
         # pass 2: the code.  The compiler writes over what is in RAM; the few bytes it
         # skips (DEF FN parameters) keep what was there.  On a freshly set-up 128 that is
         # the compiler's own image, which the Tape Loader left at 48900..62122 before
         # installing it into the RAM disk; elsewhere, zeros (the rest is stack residue
-        # that the tape can't tell us).
-        img = self.m.img
-        for i in range(self.vars_start):
-            self.far[i] = img.prior_ram((self.out_base + i) & 0xFFFF) if self.exact else 0
+        # that the tape can't tell us).  Over a deleted program, it is the program.
+        built_at = self.prog_addr if deleted else self.out_base
+        for i in range(self.data_start if mode == 'D' else self.vars_start):
+            self.far[i] = self.prior_ram((built_at + i) & 0xFFFF, prog, deleted) if self.exact else 0
         self.counting = 0
         self.run_pass()
-        res.code = bytes(self.far[0:self.vars_start])
+        if mode == 'D':
+            keep = (self.data_start, self.vars_start)
+        elif mode == 'E':
+            keep = (0, self.data_start)
+        else:
+            keep = (0, self.vars_start)                    # F081: the variables are never saved
+        res.code = bytes(self.far[keep[0]:keep[1]])
         res.v11 = self.v11
-        res.load = self.code_base
+        res.load = load
         res.save = self.out_base
+        res.code_base = self.code_base
+        res.mc_bytes = self.vars_start
+        res.deleted = deleted
+        res.do_not_test = self.out_base != self.code_base     # E521: report 111, not 110
         res.var_bytes = self.var_bytes
         res.basic_bytes = len(prog)
         res.entries = list(self.entries)
-        res.unwritten = list(self.unwritten)
+        res.unwritten = [] if mode == 'D' else list(self.unwritten)
         res.rts = [(n, (self.m.rt_addr(n) + self.code_base) & 0xFFFF) for n in range(1, 132) if self.m.used(n)]
         res.variables = self.variable_list()
         res.line_starts = list(self.line_starts)
@@ -2639,6 +2715,19 @@ class Compiler:
         res.arrays = [dict(a) for a in self.arrays]
         res.strvars = [dict(v) for v in self.strvars]
 
+    def prior_ram(self, a, prog, deleted):
+        """What pass 2 finds at address a before writing there.  After 'delete the BASIC'
+        that is the program: where it was loaded (PROG on), and its copy moved up to end
+        at RAMTOP (an LDDR, so the copy wins where the two overlap)."""
+        if deleted:
+            n = len(prog)
+            moved = self.ramtop + 1 - n
+            if moved <= a <= self.ramtop:
+                return prog[a - moved]
+            if self.prog_addr <= a < self.prog_addr + n:
+                return prog[a - self.prog_addr]
+        return self.m.img.prior_ram(a)
+
     def variable_list(self):
         out = []
         for idx, (name, typ) in enumerate(self.names):
@@ -2646,3 +2735,21 @@ class Compiler:
             off = 2 * idx if idx < self.n_int else 5 * (idx - self.n_int) + 2 * self.n_int
             out.append((name, t, (off + self.vars_start + self.code_base) & 0xFFFF))
         return out
+
+
+def join_parts(d, e):
+    """The two halves of a big program (D, then E) as the one block they make: E's code,
+    then D's DATA right after it, at the program's code base."""
+    if not (d.ok and e.ok and d.mode == 'D' and e.mode == 'E'):
+        raise ValueError('join_parts wants a D result and an E result, both compiled')
+    if d.load != e.load + len(e.code) or e.load != e.code_base:
+        raise ValueError(f"the halves don't meet: E is {len(e.code)} bytes at {e.load}, D belongs at {d.load}")
+    res = Result(**{f: getattr(e, f) for f in e.__dataclass_fields__ if f not in ('parts', 'code')})
+    res.mode = 'D+E'
+    res.code = e.code + d.code
+    res.save = res.load = e.load
+    res.asked = d.asked or e.asked
+    res.deleted = d.deleted or e.deleted
+    res.do_not_test = False
+    res.parts = [d, e]
+    return res

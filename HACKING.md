@@ -41,7 +41,7 @@ Each method in `compiler.py` is marked with the address of the routine it follow
 Some conventions of the translation:
 
 - **CH_ADD is an index.** The original copies each line into a buffer and walks it with the ROM's `RST 18` (GET_CHAR) and `RST 20` (NEXT_CHAR), which skip spaces and colour codes. `get_char()`, `next_char()` and `skip_over()` do the same to `self.buf`.
-- **Emitting.** `emit_byte`, `emit_word`, `emit_word_reloc` (adds the load address), `call_rt(n)` (a `CALL` to runtime routine n, marking it used), and `emit('ld hl,$2758; exx; ret')` for a fragment. Code is only stored in pass 2 (`self.storing`); in passes 0 and 1 only the program counter moves.
+- **Emitting.** `emit_byte`, `emit_word`, `emit_word_reloc` (adds the load address), `call_rt(n)` (a `CALL` to runtime routine n, marking it used), and `emit('ld hl,$2758; exx; ret')` for a fragment. Code is only stored in pass 2 (`self.storing`); in passes 0 and 1 only the program counter moves. DATA has its own test, `self.storing_data`, because the D and E commands store one and not the other (see "Big programs").
 - **Rewinding.** `save_state()` / `restore_state(st)` save and restore both CH_ADD and the code PC; `rewind_code(st)` restores only the PC. The original uses this to compile an operand, look at the type it produced, and recompile differently.
 - **Probing.** To specialise `a*2`, `a+1` or `INT (a/4)`, the compiler compiles the right operand as a *probe* (`probe(fn)`), which reports whether it was a small constant, a power of two or an integer variable. Anything complicated ends the probe early: `probe_abort()` returns True, and the level that noticed returns at once (`if self.probe_abort(): return`). Then the probe's code is rewound and the special form emitted. The values `probe_simple` and `probe_pow2` can take are listed in a comment above `probe_abort`.
 - **Runtime routines by name.** `call_rt(RT.STACK_CONST)` is `CALL` to routine 110. The names and their one-line descriptions (`rtnames.py`) are ours, from reading the routines; the numbers are the compiler's.
@@ -54,12 +54,25 @@ Some conventions of the translation:
 1. **Pass 0** (counting, `pass0`): directives are read (only here, and only before the first `REM : OPEN #`), variables are entered in the name table in order of appearance, and every constant GO TO / GO SUB / RESTORE target is added to the line table. The whole code generator runs, but nothing is stored.
 2. The routine table is cleared.
 3. **Pass 1** (counting): the whole generator again, now with every variable's type known. Each compiled line's address is recorded in the line table. At the end the runtime routines are laid out (`rtlib.Machine.layout`), and for computed jumps the line table is emitted after them.
-4. **Addresses**: DATA starts after pass 1's code, then the variables (simple variables, integers first; then FOR limits and steps for letters a..z; arrays; strings), and the whole block is placed just below RAMTOP.
+4. **Addresses**: DATA starts after pass 1's code, then the variables (simple variables, integers first; then FOR limits and steps for letters a..z; arrays; strings), and the whole block is placed just below RAMTOP. Then come the room checks, and for a big program the original's way round them (next section).
 5. **Pass 2** (storing): the generator runs a third time and writes. Forward jumps are patched as their targets become known: IF's `JP Z` at the end of its line, FOR's `JP` by its NEXT, DEF FN's `JP` at the end of its body.
 
 The routine layout runs at the end of every pass. A routine that falls through into the next one marks it as used while it is being laid out.
 
 Statements are dispatched by token (`dispatch`), expressions go down the levels `expr` (OR) → `expr_and` → `expr_compare` → `expr_add` → `expr_mul` → `expr_power` → `operand`.
+
+## Big programs: D, E, and deleting the BASIC
+
+The original compiles in the Spectrum's own memory, beside the BASIC program, so a big program runs out of room. `_compile` follows its placement logic (v1.2: 0xE3AA to 0xE5D6) step by step, after pass 1:
+
+- **How much to keep** (0xE5AF). The C command keeps the code and DATA, and room for the variables after them if there is any; if there isn't, the variables are left out, the code is built higher up, and the report says DO NOT TEST. The D command keeps only the DATA, and E only the rest. Which one is running is the byte at 0xF072 (`self.de_flags`: C 0, D 1, E 2): the emitters check bit 0 before storing code and bit 1 before storing DATA, so all three passes still run the whole generator.
+- **Whether it can be done** (0xE566), in this order: the code and its variables must fit between 0x6000 and RAMTOP; the code proper must fit even with the BASIC deleted; and the code, built over the program, mustn't reach a line before it has been read (the `overflow` flag, set at the end of each line in passes 0 and 1: `pc >= the line's address + the free space`). Any of these is "Not enough room for m/c". Then, for C only: a program with DATA that would need the BASIC deleted gets "Use *D,*E" (presumably because its DATA, stored out ahead of the code, would land on lines not yet read).
+- **Where it goes**: just below RAMTOP (`out_base`). The code is designed for `code_base`, RAMTOP minus code, DATA and variables, so each half of a split program is built in one place and belongs in another. The report's `LOAD` address says where: `code_base`, and for the DATA half `code_base` plus the code's length.
+- **Deleting the BASIC** (0xE4CB). If even the part being kept won't fit beside the program, the original asks `OKAY TO DELETE BASIC? (Y/N)` (0xE54D; the message goes to the lower screen whatever P said, and the wait reads the keyboard port directly). On Y it moves the program up to end at RAMTOP, empties it, and builds the code from where the program started, reading the lines from their new home. Afterwards it moves the code up under RAMTOP. On N it stops with "Not enough room for m/c". `compile(prog, mode, delete)` takes the answer; pyhsb never touches the user's file, so the command line answers Y unless given `--keep-basic`.
+
+`compile_whole` is the policy on top: the C command, and if that says "Use *D,*E", D then E, joined by `join_parts` into the one block the two halves make (E's code, then D's DATA). Each half is exactly the original's; the halves of a program that fits partition its C build byte for byte (`tests/test_bigprogs.py`).
+
+In exact mode the bytes the compiler skips (DEF FN's parameter slots) hold what was in RAM where the code was built. When the BASIC was deleted, that is the program itself (`prior_ram`): the original leaves the program's own bytes there, and that was measured.
 
 ## The runtime library
 
@@ -87,10 +100,11 @@ pyhsb was written against the original, and every change was checked by compilin
 
 - **The comparison** covered everything the original produces: the code block, the load and build addresses, the variables' size, the `LINE n:` entry points, the printed report, and the whole TAP with its loader. On a mismatch it gave the first differing address, the BASIC line it fell in, and both disassemblies there, which was usually enough to find the routine to reread.
 - **The programs**: the tape's own examples through the manual's tutorial steps; real games; a directed case for every directive and statement form, including every error the compiler reports; and a grammar-driven generator of random valid programs (mixed REAL/INTEG/POSINT variables, arrays, strings, DEF FN, directives in random combination), whose failures were minimised by removing lines and statements while the difference remained. Thousands of generated programs came out identical, for both versions.
+- **Big programs**: each half (D and E), both answers to the delete question, DO NOT TEST, every room check, and the overflow check either side of its exact edge, in both versions; and a 33 KB text adventure, whose two halves the real compiler made and pyhsb reproduces byte for byte.
 - **Programs the original crashes on** (an out-of-range constant rounded mid-compile: see "Exact and fixed") were matched against pyhsb's "Integer out of range" at the same line.
 - **Program bytes** for tests were stored the way the ROM stores a line (`source.tokenize`), since some tools that turn text into Spectrum BASIC don't write the hidden number after `BIN`.
 
-To build your own oracle, any emulator that can load the tape, run the compiler (on a 128: TRUE VIDEO + INV VIDEO, then C; `X` first sets RAMTOP to 65367, as pyhsb assumes by default) and let you read memory afterwards will do. The compiler's final report gives the code's address and length.
+To build your own oracle, any emulator that can load the tape, run the compiler (on a 128: TRUE VIDEO + INV VIDEO, then C; `X` first sets RAMTOP to 65367, as pyhsb assumes by default) and let you read memory afterwards will do. The compiler's final report gives the code's address and length. For big programs: press X *before* loading the program (installing the compiler leaves RAMTOP at 48899, too low for a big program to load); D and E are menu keys like C; and the delete question's wait loop reads the keyboard port itself rather than calling the ROM (v1.2: the test for Y is at 0xE559), so stop there and hold Y or N.
 
 ## Things that were surprising
 
@@ -99,9 +113,11 @@ To build your own oracle, any emulator that can load the tape, run the compiler 
 - **The line table lives on top of other code** (in v1.2, the installer's leftovers in the compiler's bank). A lookup that runs off its end reads those bytes, and pyhsb keeps the table as bytes in the same place so it reads the same ones.
 - **A line can hide its REM behind colour codes**, because GET_CHAR skips them.
 - **The compiler stays in ordinary RAM after installing itself**, so bytes it never writes can hold its own image.
+- **v1.1 reads each line where it is, in the program.** pyhsb gives it the rest of the program as its "line", and the ROM's number reader is handed text in the interpreter's memory, so that copy has to stop at the line's end and go where v1.1 would read it. Copied whole, it once landed on v1.1's line table and, in a big enough program, on its code.
+- **A big program's two halves are the same compile.** D and E each run all three passes over the whole program and differ only in what they store, so the halves fit together exactly, and a split program's report says "M/C: n BYTES" for the whole of it in both halves.
 
 ## Versions
 
 - **v1.2 for the 128** is the default, and the one the compiler targets; its code also runs on a 48K.
-- **v1.1 for the 48K** (the tape's other side) is supported with `--v11`. It's the same compiler with small differences, each marked `v1.1` in `compiler.py`: keywords matched as tokens only; no BREAK or VAL directives, and a `REM : LPRINT` directive; no PLAY or VAL$; BEEP and COPY call the ROM directly; a different home for the line and name tables; lines compiled in place.
+- **v1.1 for the 48K** (the tape's other side) is supported with `--v11`. It's the same compiler with small differences, each marked `v1.1` in `compiler.py`: keywords matched as tokens only; no BREAK or VAL directives, and a `REM : LPRINT` directive; no PLAY or VAL$; BEEP and COPY call the ROM directly; a different home for the line and name tables; lines compiled in place. Its big-program logic is v1.2's, moved, but it has much less room: it lives in ordinary memory, so programs start at 35698 instead of 24259.
 - The +3 disk version isn't supported.

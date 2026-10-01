@@ -7,6 +7,8 @@ tape, side B) and the 128's ROM 1, the way an emulator needs its ROMs.
     ./pyhsb.py prog.tap -o out.tap           # a TAP holding a BASIC program
     ./pyhsb.py prog.bas --open --int i,j     # add REM : INT i,j and REM : OPEN # for you
     ./pyhsb.py prog.bas --report             # the compiler's own summary, and its routines and variables
+    ./pyhsb.py big.bas                       # too big to sit beside its BASIC: compiled anyway, and it says how
+    ./pyhsb.py big.bas --part data           # one half, as the original's D command makes it (code: E)
 
 --tape and --rom say where the compiler and ROM are (default: $PYHSB_TAPE and
 $PYHSB_ROM, else HiSoft-BASIC-Compiler-v1.2-128K.tap and 128-1.rom in the
@@ -46,6 +48,13 @@ def main(argv=None):
     ap.add_argument('--tape', help='the compiler tape (default: side B, v1.2; with --v11, side A)')
     ap.add_argument('--rom', help="the ROM (default: the 128's ROM 1; with --v11, the 48K ROM)")
     ap.add_argument('--ramtop', type=int, default=compiler.RAMTOP_X, help='RAMTOP when compiling (X sets 65367)')
+    ap.add_argument('--part', choices=('data', 'code'),
+                    help="compile one half of a big program, as the original's D (only the DATA) or "
+                         'E (all but the DATA) command does: a CODE block for where it belongs, no loader')
+    ap.add_argument('--keep-basic', action='store_true',
+                    help='answer N when the original would ask OKAY TO DELETE BASIC? (Y/N): stop with '
+                         '"Not enough room for m/c", as it does (by default pyhsb answers Y: your source '
+                         'is never touched)')
     ap.add_argument('--exact', action='store_true',
                     help="reproduce the original exactly, bugs and all (by default, HiSoft's compile-time "
                          'bugs are fixed: see README.md)')
@@ -88,15 +97,24 @@ def run(a, ap, t0):
     prog = source.add_directives(prog, directives, a.open, a.line, kw, c.fp)
     if img.v11:
         prog = source.tokenize_directives(prog, kw)      # v1.1 reads directives only as tokens
-    res = c.compile(prog)
+    if a.part:
+        res = c.compile(prog, 'D' if a.part == 'data' else 'E', delete=not a.keep_basic)
+    else:
+        res = c.compile_whole(prog, delete=not a.keep_basic)
     if not res.ok:
         print(f'pyhsb: {src.name}: {res.error}' + (f' at line {res.error_line}' if res.error_line is not None else '')
               + (f' ({res.detail})' if res.detail else ''), file=sys.stderr)
         return 1
-    entry = res.entries[0][1] if res.entries else res.load
-    tape_out = (tap.program_tap(name, tap.loader(res.load - 1, entry), autostart=10)
-                + tap.code_tap('code', res.load, res.code))
-    out = Path(a.out) if a.out else src.with_name(src.stem + '-comp.tap')
+    big_program_notes(res, src.name)
+    entry = res.entries[0][1] if res.entries else res.code_base
+    if a.part:
+        # one half: a CODE block for where it belongs, as the original's SAVE line would make it
+        tape_out = tap.code_tap(a.part, res.load, res.code)
+        out = Path(a.out) if a.out else src.with_name(f'{src.stem}-comp-{a.part}.tap')
+    else:
+        tape_out = (tap.program_tap(name, tap.loader(res.load - 1, entry), autostart=10)
+                    + tap.code_tap('code', res.load, res.code))
+        out = Path(a.out) if a.out else src.with_name(src.stem + '-comp.tap')
     out.write_bytes(tape_out)
     if a.bin:
         Path(a.bin).write_bytes(res.code)
@@ -108,17 +126,51 @@ def run(a, ap, t0):
             Path(a.raw).write_bytes(raw)
         if a.listing:
             Path(a.listing).write_text(report.render_text(raw, kw) + '\n')
-    print(f'{src.name}: {len(prog)} bytes of BASIC -> {len(res.code)} bytes of code at {res.load}'
-          + (f' (built at {res.save})' if res.save != res.load else '')
-          + f' + {res.var_bytes} bytes of variables; entry {entry}; {(time.time() - t0) * 1000:.0f} ms -> {out}')
+    if a.part:
+        print(f'{src.name}: {len(prog)} bytes of BASIC -> its {a.part} half: {len(res.code)} bytes for {res.load}'
+              + f' (of {res.mc_bytes} bytes of code at {res.code_base} + {res.var_bytes} bytes of variables);'
+              + f' entry {entry}; {(time.time() - t0) * 1000:.0f} ms -> {out}')
+    else:
+        print(f'{src.name}: {len(prog)} bytes of BASIC -> {len(res.code)} bytes of code at {res.load}'
+              + (f' (built at {res.save})' if res.save != res.load else '')
+              + f' + {res.var_bytes} bytes of variables; entry {entry}; {(time.time() - t0) * 1000:.0f} ms -> {out}')
     if img.version == 'unknown':
         print('  (note: this compiler image is not one pyhsb was checked against)', file=sys.stderr)
     if len(res.entries) > 1:
         print('  entry points: ' + ', '.join(f'line {l} -> USR {ad}' for l, ad in res.entries))
     if a.report and not img.v11:
-        res.list_directive = 1                         # as if REM : LIST: the routine and variable map
+        for r in [res] + res.parts:
+            r.list_directive = 1                       # as if REM : LIST: the routine and variable map
         print(report.render_text(report.render(img, res, exact=a.exact), kw))
     return 0
+
+
+def big_program_notes(res, name):
+    """Say plainly, on stderr, when pyhsb took one of the original's big-program paths."""
+    def say(text):
+        print(f'pyhsb: {name}: {text}', file=sys.stderr)
+    if res.mode == 'D+E':
+        d, e = res.parts
+        say("the code and its DATA don't fit beside the BASIC program together, so the original "
+            'says "Use *D,*E". pyhsb compiled the two halves its manual describes, D (the DATA: '
+            f'{len(d.code)} bytes for {d.load}) and E (the rest: {len(e.code)} bytes for {e.load}), '
+            'and joined them')
+    if res.deleted:
+        if res.mode == 'D+E':
+            which = ' and '.join(f'the {"DATA" if r.mode == "D" else "code"} half' for r in res.parts if r.deleted)
+        else:
+            which = {'D': 'the DATA half', 'E': 'the code half'}.get(res.mode, 'the code')
+        say(f"{which} doesn't fit beside the BASIC program, so the original asks OKAY TO DELETE "
+            'BASIC? (Y/N) and builds it over the program. pyhsb answered Y (your source is never '
+            'touched; --keep-basic answers N)')
+    if res.do_not_test and res.mode == 'C':
+        say(f'the original says DO NOT TEST: it leaves the code at {res.save}'
+            + (' (built over the BASIC, then moved up)' if res.deleted else '')
+            + f', not at {res.load}, where it runs; the TAP loads it at {res.load}')
+    if res.mode in ('D', 'E'):
+        other = 'code' if res.mode == 'D' else 'data'
+        say(f"one half only (the original's {res.mode} command); the {other} half goes with it, "
+            f'and together they run from {res.code_base}')
 
 if __name__ == '__main__':
     sys.exit(main())
