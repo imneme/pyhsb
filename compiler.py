@@ -205,6 +205,13 @@ class Compiler:
             return True
         return False
 
+    def text_at(self):
+        """Where the ROM reads the line being compiled: v1.2's line buffer (0x45A9); v1.1
+        compiles lines in place, in the program itself."""
+        if self.v11:
+            return self.prog_addr + self.line_offsets[self.li] + 4
+        return romfp.TEXT_AT
+
     def error(self, code, detail=''):
         raise CompileError(code, self.line_no, self.ch, detail)
 
@@ -378,7 +385,7 @@ class Compiler:
         if self.not_number():
             self.error(101)
         if self.number_from_digits:
-            x, self.ch = self.fp.dec_to_fp(bytes(self.buf), self.ch)
+            x, self.ch = self.fp.dec_to_fp(self.buf, self.ch, self.text_at())
             self.calc.append(x)
             return
         i = self.ch
@@ -1926,7 +1933,7 @@ class Compiler:
             if self.not_number():
                 ok = False
             else:
-                x, self.ch = self.fp.dec_to_fp(bytes(self.buf), self.ch)
+                x, self.ch = self.fp.dec_to_fp(self.buf, self.ch, self.text_at())
                 self.calc.append(x)
                 self.next_char()
                 ok = True

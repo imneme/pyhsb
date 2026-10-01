@@ -114,14 +114,19 @@ class ROMFP:
             raise ROMError(0x0A)
         return y[2] | y[3] << 8
 
-    def dec_to_fp(self, text, pos):
-        """DEC_TO_FP on text (bytes of the line buffer) from index pos: returns
-        (the 5-byte number, the index after it)."""
+    def dec_to_fp(self, text, pos, at=TEXT_AT):
+        """DEC_TO_FP on text (a line, from its start) from index pos: returns (the 5-byte
+        number, the index after it).  The line is put at `at` first, up to its CR (the
+        number ends before that): v1.2's line buffer, or, for v1.1, which reads lines where
+        they are, the line's own place in the program.  (Never more: copied whole, v1.1's
+        'buffer' is the rest of the program, and lands on its line table and its code.)"""
         self.calls += 1
-        self.mem[TEXT_AT:TEXT_AT + len(text)] = text
+        end = text.find(0x0D, pos)
+        end = len(text) if end < 0 else end + 1
+        self.mem[at:at + end] = text[:end]
         self._setup([])
-        self.m.setw(CH_ADD, TEXT_AT + pos)
+        self.m.setw(CH_ADD, at + pos)
         self.cpu.a = text[pos]
-        self.cpu.hl = TEXT_AT + pos
+        self.cpu.hl = at + pos
         self.cpu.call(DEC_TO_FP)
-        return self._stack()[-1], self.m.w(CH_ADD) - TEXT_AT
+        return self._stack()[-1], self.m.w(CH_ADD) - at
