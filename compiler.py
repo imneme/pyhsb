@@ -2360,7 +2360,7 @@ class Compiler:
         else:
             # DE73: would the code, built in place below RAMTOP, reach this BASIC line?
             # (F077, the line's address, + 44E9, which is free space - PROG)
-            if self.pc > (self.prog_addr + self.line_offsets[self.li] + self.free_below) & 0xFFFF:
+            if self.pc >= (self.prog_addr + self.line_offsets[self.li] + self.free_below) & 0xFFFF:
                 self.overflow = 1
         self.li += 1
         if not self.load_line():
