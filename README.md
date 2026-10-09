@@ -47,6 +47,8 @@ Keep the tape and ROM in the current directory under those names, or pass `--tap
 ./pyhsb.py big.bas --keep-basic            # say N when the original would offer to delete the BASIC
 ```
 
+Like the original, pyhsb compiles only the lines after a `REM : OPEN #`, so a program without one compiles to no code at all (pyhsb says so on stderr); `--open` adds one at the start.
+
 The directives (`REM : OPEN #`, `REM : INT ...`, `REM : LEN ...` and the rest) are the original's; see its manual.
 
 ## Big programs

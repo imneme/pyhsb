@@ -106,6 +106,10 @@ def run(a, ap, t0):
               + (f' ({res.detail})' if res.detail else ''), file=sys.stderr)
         return 1
     big_program_notes(res, src.name)
+    if not source.open_lines(prog):
+        print(f'pyhsb: {src.name}: no REM : OPEN # line, so there was nothing to compile: the original '
+              f'compiles only the lines after one, and reports "M/C: 0 BYTES" too. Put REM : OPEN # '
+              f'before the first line to compile, or use --open', file=sys.stderr)
     entry = res.entries[0][1] if res.entries else res.code_base
     if a.part:
         # one half: a CODE block for where it belongs, as the original's SAVE line would make it
